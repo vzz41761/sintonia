@@ -1,10 +1,11 @@
--- cobble hills logic (Sintonia RP - Money Maker)
+-- cobble hills logic (Sintonia RP - Money Maker v3)
 pcall(function() if setthreadidentity then setthreadidentity(8) end end)
 if getgenv().Cobble_RP_Unload then pcall(getgenv().Cobble_RP_Unload) end
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local Workspace = game:GetService("Workspace")
+local RS = game:GetService("ReplicatedStorage")
 local LP = Players.LocalPlayer
 local Camera = Workspace.CurrentCamera
 
@@ -12,7 +13,7 @@ local Config = getgenv().CobbleConfig or {}
 Config.ESP = Config.ESP or { Enabled=true, Players=true, Jobs=true }
 Config.Movement = Config.Movement or { SpeedEnabled=false, SpeedValue=50 }
 Config.Aim = Config.Aim or { Enabled=false, Key=Enum.KeyCode.E, FOV=120, Smooth=0.55, ShowFOV=true }
-Config.Farm = Config.Farm or { AutoLixeiro=false, AutoCarga=false }
+Config.Farm = Config.Farm or { ActiveJob = nil }
 getgenv().CobbleConfig = Config
 
 local connections = {}
@@ -20,102 +21,118 @@ local alive = true
 local function track(c) connections[#connections+1] = c; return c end
 
 -- ==========================================
--- CACHE DE EMPREGOS E PROMPTS
+-- TELEPORTE SUAVE (GLIDE) E VOO
 -- ==========================================
-local CachedJobs = {}
+getgenv().Cobble_GlideTo = function(targetPos)
+    local char = LP.Character
+    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+    if not hrp then return end
+    
+    print("[cobble] Voando até o destino...")
+    local startPos = hrp.Position
+    local distance = (startPos - targetPos).Magnitude
+    local speed = 150 
+    local timeToTravel = distance / speed
+    local t = 0
+    
+    local conn
+    conn = RunService.Heartbeat:Connect(function(dt)
+        t = t + dt
+        local alpha = math.clamp(t / timeToTravel, 0, 1)
+        hrp.CFrame = CFrame.new(startPos:Lerp(targetPos, alpha))
+        if alpha >= 1 then conn:Disconnect() end
+    end)
+end
+
+getgenv().Cobble_GoToMercado = function()
+    local mercado = Workspace:FindFirstChild("Mercadinho") or Workspace:FindFirstChild("Prefeitura")
+    if mercado then
+        local part = mercado:FindFirstChildWhichIsA("BasePart") or mercado.PrimaryPart
+        if part then getgenv().Cobble_GlideTo(part.Position + Vector3.new(0,5,0)) end
+    else
+        print("[cobble] Mercadinho não encontrado no mapa atual.")
+    end
+end
+
+-- ==========================================
+-- SCANNER DE PROMPTS (LOGS)
+-- ==========================================
+getgenv().Cobble_DumpPrompts = function()
+    print("=== PROMPTS NUM RAIO DE 100M ===")
+    local root = LP.Character and LP.Character:FindFirstChild("HumanoidRootPart")
+    if not root then return end
+    for _, obj in ipairs(Workspace:GetDescendants()) do
+        if obj:IsA("ProximityPrompt") then
+            local part = obj.Parent:IsA("BasePart") and obj.Parent or obj.Parent:FindFirstChildWhichIsA("BasePart")
+            if part and (part.Position - root.Position).Magnitude < 100 then
+                print("-> " .. obj.Parent.Name .. " | Action: '" .. obj.ActionText .. "' | Object: '" .. obj.ObjectText .. "'")
+            end
+        end
+    end
+end
+
+-- ==========================================
+-- CACHE DE EMPREGOS
+-- ==========================================
+getgenv().Cobble_Jobs = {}
 task.spawn(function()
     while alive do
         local temp = {}
         for _, obj in ipairs(Workspace:GetDescendants()) do
-            if obj:IsA("ProximityPrompt") and obj.Enabled then
+            if obj:IsA("ProximityPrompt") then
+                local parent = obj.Parent
                 local action = obj.ActionText:lower()
-                local object = obj.ObjectText:lower()
-                local parentName = obj.Parent.Name:lower()
+                local objectText = obj.ObjectText:lower()
+                local parentName = parent.Name:lower()
+                local combined = action .. " " .. objectText .. " " .. parentName
                 
-                -- Detecta se é um ponto de emprego ou entrega
-                if action:find("trabalhar") or action:find("emprego") or object:find("lixeiro") or object:find("carga") or parentName:find("entrega") then
-                    local part = obj.Parent:IsA("BasePart") and obj.Parent or obj.Parent:FindFirstChildWhichIsA("BasePart")
+                if combined:find("lixo") or combined:find("carga") or combined:find("entrega") or combined:find("trabalho") then
+                    local part = parent:IsA("BasePart") and parent or parent:FindFirstChildWhichIsA("BasePart")
                     if part then
-                        temp[obj] = { Name = obj.ObjectText ~= "" and obj.ObjectText or obj.Parent.Name, Pos = part.Position, Prompt = obj }
+                        temp[obj] = { Name = obj.ObjectText ~= "" and obj.ObjectText or parent.Name, Pos = part.Position, Obj = obj }
                     end
                 end
             end
         end
-        CachedJobs = temp
-        task.wait(2)
+        getgenv().Cobble_Jobs = temp
+        task.wait(3)
     end
 end)
 
 -- ==========================================
--- FUNÇÃO DE TELEPORTE SEGURO (GLIDE)
+-- AUTO FARM (CORRIGIDO)
 -- ==========================================
-getgenv().Cobble_GlideTo = function(targetPos)
-    local char = LP.Character
-    local hum = char and char:FindFirstChildOfClass("Humanoid")
-    if not hum then return end
-    
-    print("[cobble] Deslizando até o destino...")
-    local oldSpeed = hum.WalkSpeed
-    hum.WalkSpeed = 200 -- Fica rápido mas não é um teleporte
-    
-    local distance = (char.HumanoidRootPart.Position - targetPos).Magnitude
-    local timeToTravel = distance / 200
-    
-    hum:MoveTo(targetPos)
-    task.wait(timeToTravel + 0.5) -- Espera chegar
-    hum.WalkSpeed = oldSpeed -- Restaura a velocidade
-    hum:MoveTo(char.HumanoidRootPart.Position) -- Para de andar
-    print("[cobble] Chegou ao destino.")
-end
-
--- ==========================================
--- AUTO FARM (LIXEIRO / CARGA) INTELIGENTE
--- ==========================================
-local isFarming = false
 getgenv().Cobble_StartFarm = function(jobType)
-    if isFarming then return end
-    isFarming = true
+    if Config.Farm.ActiveJob then print("[cobble] Já tem um farm rodando. Pare o outro primeiro."); return end
+    Config.Farm.ActiveJob = jobType
+    print("[cobble] Iniciando Auto " .. jobType)
     
     task.spawn(function()
-        local char = LP.Character
-        local hum = char and char:FindFirstChildOfClass("Humanoid")
-        local root = char and char:FindFirstChild("HumanoidRootPart")
-        if not hum or not root then isFarming = false; return end
-        
-        print("[cobble] Iniciando loop de farm: " .. jobType)
-        
-        while isFarming and alive do
-            -- 1. Acha o prompt mais perto (coleta ou entrega)
-            local closestPrompt, minDist = nil, 50
-            for prompt, info in pairs(CachedJobs) do
-                -- Se o farm for Lixeiro, procura lixo
-                if jobType == "Lixeiro" and info.Name:lower():find("lixo") then
-                    local d = (root.Position - info.Pos).Magnitude
-                    if d < minDist then minDist = d; closestPrompt = prompt end
-                -- Se o farm for Carga, procura carga
-                elseif jobType == "Carga" and info.Name:lower():find("carga") then
-                    local d = (root.Position - info.Pos).Magnitude
-                    if d < minDist then minDist = d; closestPrompt = prompt end
+        while Config.Farm.ActiveJob == jobType and alive do
+            local char = LP.Character
+            local hrp = char and char:FindFirstChild("HumanoidRootPart")
+            if not hrp then task.wait(1); continue end
+            
+            local closest, minDist = nil, 500
+            local targetKeyword = jobType == "Lixeiro" and "lixo" or "carga"
+            
+            for obj, info in pairs(getgenv().Cobble_Jobs) do
+                if info.Name:lower():find(targetKeyword) then
+                    local d = (hrp.Position - info.Pos).Magnitude
+                    if d < minDist then minDist = d; closest = info end
                 end
             end
             
-            if closestPrompt then
-                -- Vai até o item e pega
-                if minDist > 10 then
-                    -- Se tiver longe, desliza até lá
-                    hum.WalkSpeed = 150
-                    hum:MoveTo(CachedJobs[closestPrompt].Pos)
-                    task.wait(1)
+            if closest then
+                if minDist > 8 then
+                    getgenv().Cobble_GlideTo(closest.Pos + Vector3.new(0, 3, 0))
+                    task.wait((minDist / 150) + 0.5)
                 else
-                    -- Se tiver perto, para e pega
-                    hum.WalkSpeed = 16
-                    pcall(function() fireproximityprompt(closestPrompt) end)
-                    print("[cobble] Coletado: " .. CachedJobs[closestPrompt].Name)
-                    task.wait(1.5)
+                    pcall(function() fireproximityprompt(closest.Obj) end)
+                    print("[cobble] Coletou: " .. closest.Name)
+                    task.wait(2)
                 end
             else
-                -- Se não achou nada, espera um pouco e anda um pouco aleatoriamente
-                hum.WalkSpeed = 16
                 task.wait(2)
             end
         end
@@ -123,12 +140,12 @@ getgenv().Cobble_StartFarm = function(jobType)
 end
 
 getgenv().Cobble_StopFarm = function()
-    isFarming = false
+    Config.Farm.ActiveJob = nil
     print("[cobble] Farm parado.")
 end
 
 -- ==========================================
--- AIMBOT E ESP (Mantidos do Safe Mode)
+-- AIMBOT E ESP (Mantidos)
 -- ==========================================
 local aimHeld, aimTarget = false, nil
 local CachedPlayers = {}
@@ -177,14 +194,12 @@ RunService:BindToRenderStep("cobble_aim", Enum.RenderPriority.Camera.Value + 1, 
     end
 end)
 
--- ESP Simples (Players e Jobs)
 local playerDraw, jobDraw = {}, {}
 local function destroyCache(c) for _,d in pairs(c) do pcall(function() d:Remove() end) end end
 
 track(RunService.RenderStepped:Connect(function()
     local camPos = Camera.CFrame.Position
-    
-    -- Players ESP
+    -- Players
     local activeP = {}
     if Config.ESP.Enabled and Config.ESP.Players then
         for plr, data in pairs(CachedPlayers) do
@@ -202,22 +217,20 @@ track(RunService.RenderStepped:Connect(function()
                 local h = spBot.Y - sp.Y; local w = h * 0.6
                 o.box.Position = Vector2.new(sp.X - w/2, sp.Y); o.box.Size = Vector2.new(w, h); o.box.Visible = true
                 o.name.Text = plr.Name; o.name.Position = Vector2.new(sp.X, sp.Y - 16); o.name.Visible = true
-            else
-                o.box.Visible=false; o.name.Visible=false
-            end
+            else o.box.Visible=false; o.name.Visible=false end
         end
     end
     for p, o in pairs(playerDraw) do if not activeP[p] then o.box:Remove(); o.name:Remove(); playerDraw[p] = nil end end
     
-    -- Jobs ESP
+    -- Jobs
     local activeJ = {}
     if Config.ESP.Enabled and Config.ESP.Jobs then
-        for prompt, info in pairs(CachedJobs) do
+        for obj, info in pairs(getgenv().Cobble_Jobs) do
             local dist = (camPos - info.Pos).Magnitude
-            if dist < 300 then
-                activeJ[prompt] = true
-                local d = jobDraw[prompt]
-                if not d then d = Drawing.new("Text"); d.Center=true; d.Outline=true; d.Size=13; d.Color=Color3.fromRGB(100, 255, 100); jobDraw[prompt] = d end
+            if dist < 500 then
+                activeJ[obj] = true
+                local d = jobDraw[obj]
+                if not d then d = Drawing.new("Text"); d.Center=true; d.Outline=true; d.Size=13; d.Color=Color3.fromRGB(100, 255, 100); jobDraw[obj] = d end
                 local sp, on = Camera:WorldToViewportPoint(info.Pos)
                 if sp.Z > 0 and on then d.Text = "💼 " .. info.Name .. " [" .. math.floor(dist) .. "m]"; d.Position = Vector2.new(sp.X, sp.Y); d.Visible = true else d.Visible = false end
             end
@@ -226,19 +239,17 @@ track(RunService.RenderStepped:Connect(function()
     for j, d in pairs(jobDraw) do if not activeJ[j] then d:Remove(); jobDraw[j] = nil end end
 end))
 
--- MOVIMENTAÇÃO
 track(RunService.Heartbeat:Connect(function()
     local char = LP.Character
     if not char then return end
     local hum = char:FindFirstChildOfClass("Humanoid")
-    -- Não mexe no speed se estiver no meio do Glide/Farm
-    if hum and not isFarming then 
+    if hum and not Config.Farm.ActiveJob then 
         hum.WalkSpeed = Config.Movement.SpeedEnabled and Config.Movement.SpeedValue or 16 
     end
 end))
 
 getgenv().Cobble_RP_Unload = function()
-    alive = false; isFarming = false
+    alive = false; Config.Farm.ActiveJob = nil
     for _, c in ipairs(connections) do pcall(function() c:Disconnect() end) end
     destroyCache(playerDraw); destroyCache(jobDraw)
     if getgenv().Cobble_UI_Loaded then getgenv().Cobble_UI_Loaded:Destroy() end
