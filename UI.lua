@@ -1,10 +1,9 @@
--- cobble hills UI (Sintonia RP v3)
+-- cobble hills UI (Sintonia RP - Weapon Grabber)
 local Players = game:GetService("Players")
 local RS = game:GetService("ReplicatedStorage")
 local Config = getgenv().CobbleConfig
 if not Config then return end
 
--- Puxa o Slate
 local SU = "https://raw.githubusercontent.com/PulseZax/Slate/refs/heads/main/.lua"
 local ok, S = pcall(function() return loadstring(game:HttpGet(SU), "@Slate")() end)
 if not ok or not S then return end
@@ -21,73 +20,54 @@ pcall(function() S:SetFontFamily("Montserrat") end)
 
 local Window = S:CreateWindow({
     Name = "COBBLE <font color='#9D69FF'>SINTONIA</font>",
-    Subtitle = "ARMAS / CARROS / AIMBOT",
+    Subtitle = "AIMBOT / ESP / ARMAS",
     Icon = "crosshair", Logo = true,
     Size = UDim2.fromOffset(460, 340),
     ToggleKey = Enum.KeyCode.Insert,
     Backdrop = "aurora",
 })
 
--- ABA 1: AIMBOT
+-- ABA 1: VISUAIS (ESP)
+local tabVisuals = Window:CreateTab({ Name = "VISUAIS", Icon = "eye" })
+tabVisuals:SetColumns(2)
+
+local secEsp = tabVisuals:CreateSection({ Name = "ESP" })
+secEsp:Toggle({ Name = "Ativar ESP", Default = true, Callback = function(v) Config.ESP.Enabled = v end })
+secEsp:Toggle({ Name = "Jogadores", Default = true, Callback = function(v) Config.ESP.Players = v end })
+secEsp:Toggle({ Name = "Armas no Chão", Default = true, Callback = function(v) Config.ESP.Weapons = v end })
+secEsp:Toggle({ Name = "Carros", Default = true, Callback = function(v) Config.ESP.Cars = v end })
+
+-- ABA 2: AIMBOT
 local tabAim = Window:CreateTab({ Name = "AIMBOT", Icon = "crosshair" })
 tabAim:SetColumns(2)
-local secA = tabAim:CreateSection({ Name = "Aimbot (Legit)" })
+local secA = tabAim:CreateSection({ Name = "Aimbot (Camera)" })
 secA:Toggle({ Name = "Ativar Aimbot", Default = false, Callback = function(v) Config.Aim.Enabled = v end })
 secA:Toggle({ Name = "Mostrar FOV", Default = true, Callback = function(v) Config.Aim.ShowFOV = v end })
 secA:Slider({ Name = "FOV (px)", Min = 20, Max = 400, Default = 120, Callback = function(v) Config.Aim.FOV = v end })
 secA:Slider({ Name = "Suavidade", Min = 0.1, Max = 1.0, Default = 0.55, Callback = function(v) Config.Aim.Smooth = v end })
-secA:Paragraph({ Name = "Tecla", Text = "Aperte E (ou o botão do mouse) para mirar." })
+secA:Paragraph({ Name = "Tecla", Text = "Segure E para mirar no jogador mais próximo." })
 
--- ABA 2: SPAWNER
-local tabSpawn = Window:CreateTab({ Name = "SPAWNER", Icon = "zap" })
-tabSpawn:SetColumns(2)
-
--- Puxa as armas dinamicamente do ReplicatedStorage
-local secWpn = tabSpawn:CreateSection({ Name = "Puxar Arma (Ghost)" })
-local weaponsFound = {}
-for _, obj in ipairs(RS:GetDescendants()) do
-    if obj:IsA("Tool") then
-        weaponsFound[obj.Name] = true
-    end
-end
-for weaponName, _ in pairs(weaponsFound) do
-    secWpn:Button({ Name = "Equipar: " .. weaponName, Callback = function() 
-        if getgenv().Cobble_SpawnWeapon then getgenv().Cobble_SpawnWeapon(weaponName) end 
-    end })
-end
-
--- Spawn de Carros
-local secCar = tabSpawn:CreateSection({ Name = "Spawnar Carro" })
-local carros = {"Ferrari", "Porsche", "AUDI", "Lamborghini", "Nivus", "Hilux", "RAM", "SW4", "Tiggo 8 Pro 2023"} -- Lista baseada no mapa
-for _, cName in ipairs(carros) do
-    secCar:Button({ Name = "Spawn: " .. cName, Callback = function() 
-        if getgenv().Cobble_SpawnCar then getgenv().Cobble_SpawnCar(cName) end 
-    end })
-end
-
--- ABA 3: VISUAIS
-local tabVisuals = Window:CreateTab({ Name = "VISUAIS", Icon = "eye" })
-tabVisuals:SetColumns(2)
-local secEsp = tabVisuals:CreateSection({ Name = "ESP" })
-secEsp:Toggle({ Name = "Ativar ESP", Default = true, Callback = function(v) Config.ESP.Enabled = v end })
-secEsp:Toggle({ Name = "Jogadores", Default = true, Callback = function(v) Config.ESP.Players = v end })
-secEsp:Toggle({ Name = "Carros", Default = true, Callback = function(v) Config.ESP.Cars = v end })
-secEsp:Toggle({ Name = "Empregos", Default = true, Callback = function(v) Config.ESP.Prompts = v end })
-
--- ABA 4: PLAYER / FARM
+-- ABA 3: PLAYER E ARMAS
 local tabPlayer = Window:CreateTab({ Name = "PLAYER", Icon = "user" })
 tabPlayer:SetColumns(2)
+
 local secMov = tabPlayer:CreateSection({ Name = "Movimento" })
 secMov:Toggle({ Name = "WalkSpeed", Default = false, Callback = function(v) Config.Movement.SpeedEnabled = v end })
 secMov:Slider({ Name = "Velocidade", Min = 16, Max = 200, Default = 50, Callback = function(v) Config.Movement.SpeedValue = v end })
-secMov:Toggle({ Name = "Fly", Default = false, Callback = function(v) Config.Movement.FlyEnabled = v end })
-secMov:Toggle({ Name = "Noclip", Default = false, Callback = function(v) Config.Movement.NoclipEnabled = v end })
 
-local secFarm = tabPlayer:CreateSection({ Name = "Auto Farm" })
-secFarm:Toggle({ Name = "Auto Lixeiro", Default = false, Callback = function(v) Config.Farm.AutoTrash = v end })
-secFarm:Toggle({ Name = "Auto Carga", Default = false, Callback = function(v) Config.Farm.AutoCargo = v end })
+local secArmas = tabPlayer:CreateSection({ Name = "Armas (Puxar)" })
+secArmas:Paragraph({ Name = "Aviso", Text = "Puxa a arma mais próxima do chão pra sua mão." })
+secArmas:Button({ Name = "Puxar Arma Próxima", Icon = "zap", Callback = function()
+    local best = nil
+    for tool, _ in pairs(getgenv().Cobble_CachedWeapons or {}) do best = tool.Name; break end
+    if best and getgenv().Cobble_GrabWeapon then 
+        getgenv().Cobble_GrabWeapon(best) 
+    else 
+        print("[cobble] Nenhuma arma encontrada perto.") 
+    end
+end })
 
--- ABA 5: CONFIG
+-- ABA 4: CONFIG
 local tabConfig = Window:CreateTab({ Name = "CONFIG", Icon = "wrench" })
 tabConfig:SetColumns(1)
 tabConfig:CreateSection({ Name = "Sessão" }):Button({ Name = "UNLOAD SCRIPT", Icon = "trash-2", Callback = function()
@@ -95,5 +75,4 @@ tabConfig:CreateSection({ Name = "Sessão" }):Button({ Name = "UNLOAD SCRIPT", I
     Window:Destroy(); S:Destroy(); S.Cleanup()
 end })
 
--- Removemos o CreateLauncher que causava erro (a tecla Insert já faz o trabalho)
 getgenv().Cobble_UI_Loaded = Window
