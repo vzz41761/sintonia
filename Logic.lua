@@ -1,0 +1,357 @@
+-- cobble hills logic (Sintonia RP)
+pcall(function() if setthreadidentity then setthreadidentity(8) end end)
+if getgenv().Cobble_RP_Unload then pcall(getgenv().Cobble_RP_Unload) end
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local Workspace = game:GetService("Workspace")
+local Lighting = game:GetService("Lighting")
+local RS = game:GetService("ReplicatedStorage")
+
+local LP = Players.LocalPlayer
+local Camera = Workspace.CurrentCamera
+
+if not Drawing then warn("[cobble] sem Drawing API"); return end
+
+-- ==========================================
+-- CONFIG
+-- ==========================================
+local defaults = {
+    ESP = { Enabled=true, Players=true, Cars=true, Prompts=true },
+    Movement = { SpeedEnabled=false, SpeedValue=50, FlyEnabled=false, NoclipEnabled=false, InvisEnabled=false },
+    Farm = { AutoTrash=false, AutoCargo=false, Radius=15, GhostFarm=false },
+}
+local Config = getgenv().CobbleConfig or {}
+local function merge(dst, src) for k,v in pairs(src) do if type(v) == "table" and type(dst[k]) == "table" then merge(dst[k], v) elseif dst[k] == nil then dst[k] = v end end end
+for s,tbl in pairs(defaults) do Config[s] = Config[s] or {}; merge(Config[s], tbl) end
+getgenv().CobbleConfig = Config
+
+local connections = {}
+local alive = true
+local function track(c) connections[#connections+1] = c; return c end
+
+-- ==========================================
+-- BYPASS DO ANTI-CHEAT (Teleporte/Lixo)
+-- ==========================================
+local acBypassed = false
+task.spawn(function()
+    local filtergc = getgenv().filtergc
+    local getupvalues = debug and debug.getupvalues
+    if not (filtergc and getupvalues) then
+        warn("[cobble] Seu executor não tem filtergc. O AC não será bypassado.")
+        return
+    end
+
+    local ok, funcs = pcall(filtergc, "function", {Constants = {"FireServer", "bor", "clock"}}, false)
+    if ok and type(funcs) == "table" then
+        for _, fn in ipairs(funcs) do
+            local src = debug.info(fn, "s")
+            if type(src) == "string" and src:sub(-9) == ".ClientAC" then
+                local upvals = getupvalues(fn)
+                local teleportTable = upvals[4]
+                local target = upvals[1]
+                if type(target) == "table" and type(teleportTable) == "table" and rawget(target, "Teleporte") == 1 then
+                    for k in pairs(target) do teleportTable[k] = math.huge end
+                    acBypassed = true
+                end
+            end
+        end
+    end
+    
+    if acBypassed then
+        print("[cobble] ✅ Anti-Cheat bypassado com sucesso.")
+    else
+        warn("[cobble] ⚠️ Alvo do AC não encontrado. TPs podem causar kick.")
+    end
+end)
+
+-- ==========================================
+-- GHOST MODE (Invisibilidade Total para Farm)
+-- ==========================================
+local ghostActive = false
+local fakeModel, ghostPlatform = nil, nil
+
+getgenv().Cobble_ToggleGhost = function(state)
+    local char = LP.Character
+    if not char then return end
+    local root = char:FindFirstChild("HumanoidRootPart")
+    local hum = char:FindFirstChildOfClass("Humanoid")
+    
+    if state and not ghostActive then
+        ghostActive = true
+        local startCF = root.CFrame
+        
+        -- Cria plataforma invisível 10 studs abaixo
+        ghostPlatform = Instance.new("Part")
+        ghostPlatform.Size = Vector3.new(10, 1, 10)
+        ghostPlatform.Transparency = 1
+        ghostPlatform.Anchored = true
+        ghostPlatform.CanCollide = true
+        ghostPlatform.Parent = Workspace
+        
+        -- Clona o personagem para os outros verem
+        char.Archivable = true
+        fakeModel = char:Clone()
+        fakeModel.Name = "CobbleGhostClone"
+        for _, obj in ipairs(fakeModel:GetDescendants()) do
+            if obj:IsA("BasePart") then
+                obj.Anchored = true; obj.CanCollide = false; obj.CanQuery = false; obj.CanTouch = false
+            elseif obj:IsA("Script") or obj:IsA("LocalScript") then
+                obj:Destroy()
+            end
+        end
+        fakeModel.PrimaryPart = fakeModel:FindFirstChild("HumanoidRootPart")
+        fakeModel:PivotTo(startCF)
+        fakeModel.Parent = Workspace
+        
+        -- Deixa o personagem real invisível
+        for _, obj in ipairs(char:GetDescendants()) do
+            if obj:IsA("BasePart") then obj.Transparency = 1 end
+        end
+        
+        -- Prende o personagem real na plataforma
+        root.CFrame = CFrame.new(startCF.X, startCF.Y - 10, startCF.Z)
+        ghostPlatform.CFrame = CFrame.new(startCF.X, startCF.Y - 13.5, startCF.Z)
+        
+        Camera.CameraSubject = fakeModel:FindFirstChildOfClass("Humanoid")
+        
+    elseif not state and ghostActive then
+        ghostActive = false
+        if fakeModel then fakeModel:Destroy(); fakeModel = nil end
+        if ghostPlatform then ghostPlatform:Destroy(); ghostPlatform = nil end
+        for _, obj in ipairs(char:GetDescendants()) do
+            if obj:IsA("BasePart") then obj.Transparency = 0 end
+        end
+        Camera.CameraSubject = hum
+    end
+end
+
+-- ==========================================
+-- CACHES (Jogadores, Carros, Prompts)
+-- ==========================================
+local CachedPlayers, CachedCars, CachedPrompts = {}, {}, {}
+
+task.spawn(function()
+    while alive do
+        local temp = {}
+        for _, plr in ipairs(Players:GetPlayers()) do
+            if plr ~= LP and plr.Character then
+                local hum = plr.Character:FindFirstChildOfClass("Humanoid")
+                local root = plr.Character:FindFirstChild("HumanoidRootPart")
+                if hum and root and hum.Health > 0 then
+                    temp[plr] = { Char=plr.Character, Hum=hum, Root=root, Head=plr.Character:FindFirstChild("Head") }
+                end
+            end
+        end
+        CachedPlayers = temp
+        task.wait(0.5)
+    end
+end)
+
+task.spawn(function()
+    while alive do
+        local temp = {}
+        local folder = Workspace:FindFirstChild("CarrosSpawnados")
+        if folder then
+            for _, car in ipairs(folder:GetChildren()) do
+                local seat = car:FindFirstChild("DriveSeat", true) or car:FindFirstChildWhichIsA("VehicleSeat", true)
+                if seat then
+                    temp[car] = { Name=car.Name, Pos=seat.Position }
+                end
+            end
+        end
+        CachedCars = temp
+        task.wait(2)
+    end
+end)
+
+task.spawn(function()
+    while alive do
+        local temp = {}
+        for _, d in ipairs(Workspace:GetDescendants()) do
+            if d:IsA("ProximityPrompt") and d.Enabled then
+                local pName = d.Parent and d.Parent.Name or "?"
+                local lName = pName:lower()
+                local isTarget, color = false, Color3.new(1,1,1)
+                
+                if lName:find("lixo") or lName:find("lixeira") then 
+                    isTarget = true; color = Color3.fromRGB(100, 255, 100) -- Verde
+                elseif lName:find("carga") or lName:find("entrega") then 
+                    isTarget = true; color = Color3.fromRGB(255, 200, 50) -- Amarelo
+                end
+                
+                if isTarget and d.Parent and d.Parent:IsA("BasePart") then
+                    temp[d] = { Name=pName, Pos=d.Parent.Position, Color=color, Prompt=d }
+                end
+            end
+        end
+        CachedPrompts = temp
+        task.wait(1.5)
+    end
+end)
+
+-- ==========================================
+-- ESP DRAWINGS
+-- ==========================================
+local playerDraw, carDraw, promptDraw = {}, {}, {}
+local function destroyCache(cache) for _,d in pairs(cache) do pcall(function() d:Remove() end) end end
+
+local function updateESP()
+    local camPos = Camera.CFrame.Position
+    
+    -- Jogadores
+    local activeP = {}
+    if Config.ESP.Enabled and Config.ESP.Players then
+        for plr, data in pairs(CachedPlayers) do
+            activeP[plr] = true
+            local o = playerDraw[plr]
+            if not o then
+                o = { box=Drawing.new("Square"), name=Drawing.new("Text"), dist=Drawing.new("Text") }
+                o.box.Thickness = 1; o.box.Filled = false; o.box.Color = Color3.fromRGB(255,60,60)
+                o.name.Center=true; o.name.Outline=true; o.name.Size=13; o.name.Color=Color3.new(1,1,1)
+                o.dist.Center=true; o.dist.Outline=true; o.dist.Size=12; o.dist.Color=Color3.fromRGB(200,205,220)
+                playerDraw[plr] = o
+            end
+            local sp, on = Camera:WorldToViewportPoint(data.Root.Position + Vector3.new(0,3,0))
+            local spBot, onBot = Camera:WorldToViewportPoint(data.Root.Position - Vector3.new(0,3,0))
+            
+            if sp.Z > 0 and on and onBot then
+                local h = spBot.Y - sp.Y; local w = h * 0.6
+                o.box.Position = Vector2.new(sp.X - w/2, sp.Y); o.box.Size = Vector2.new(w, h); o.box.Visible = true
+                o.name.Text = plr.Name; o.name.Position = Vector2.new(sp.X, sp.Y - 16); o.name.Visible = true
+                o.dist.Text = math.floor((camPos - data.Root.Position).Magnitude) .. "m"
+                o.dist.Position = Vector2.new(sp.X, spBot.Y + 4); o.dist.Visible = true
+            else
+                o.box.Visible=false; o.name.Visible=false; o.dist.Visible=false
+            end
+        end
+    end
+    for plr, o in pairs(playerDraw) do if not activeP[plr] then o.box:Remove(); o.name:Remove(); o.dist:Remove(); playerDraw[plr] = nil end end
+    
+    -- Carros
+    local activeC = {}
+    if Config.ESP.Enabled and Config.ESP.Cars then
+        for model, info in pairs(CachedCars) do
+            local dist = (camPos - info.Pos).Magnitude
+            if dist < 300 then
+                activeC[model] = true
+                local d = carDraw[model]
+                if not d then d = Drawing.new("Text"); d.Center=true; d.Outline=true; d.Size=12; d.Color=Color3.fromRGB(150,200,255); carDraw[model] = d end
+                local sp, on = Camera:WorldToViewportPoint(info.Pos)
+                if sp.Z > 0 and on then d.Text = info.Name .. " [" .. math.floor(dist) .. "m]"; d.Position = Vector2.new(sp.X, sp.Y); d.Visible = true else d.Visible = false end
+            end
+        end
+    end
+    for m, d in pairs(carDraw) do if not activeC[m] then d:Remove(); carDraw[m] = nil end end
+
+    -- Empregos (Lixo/Carga)
+    local activePr = {}
+    if Config.ESP.Enabled and Config.ESP.Prompts then
+        for prompt, info in pairs(CachedPrompts) do
+            local dist = (camPos - info.Pos).Magnitude
+            if dist < 150 then
+                activePr[prompt] = true
+                local d = promptDraw[prompt]
+                if not d then d = Drawing.new("Text"); d.Center=true; d.Outline=true; d.Size=12; d.Color = info.Color; promptDraw[prompt] = d end
+                local sp, on = Camera:WorldToViewportPoint(info.Pos)
+                if sp.Z > 0 and on then d.Text = info.Name .. " [" .. math.floor(dist) .. "m]"; d.Position = Vector2.new(sp.X, sp.Y); d.Visible = true else d.Visible = false end
+            end
+        end
+    end
+    for p, d in pairs(promptDraw) do if not activePr[p] then d:Remove(); promptDraw[p] = nil end end
+end
+track(RunService.RenderStepped:Connect(updateESP))
+
+-- ==========================================
+-- AUTO FARM (LIXO E CARGA) - COM BYPASS
+-- ==========================================
+local lastFarm = 0
+track(RunService.Heartbeat:Connect(function()
+    if not (Config.Farm.AutoTrash or Config.Farm.AutoCargo) then return end
+    if tick() - lastFarm < 0.5 then return end
+    lastFarm = tick()
+    
+    local char = LP.Character
+    local root = char and char:FindFirstChild("HumanoidRootPart")
+    if not root then return end
+    
+    for prompt, info in pairs(CachedPrompts) do
+        local dist = (root.Position - info.Pos).Magnitude
+        if dist <= Config.Farm.Radius then
+            local isTrash = info.Name:lower():find("lixo")
+            local isCargo = info.Name:lower():find("carga") or info.Name:lower():find("entrega")
+            
+            if (Config.Farm.AutoTrash and isTrash) or (Config.Farm.AutoCargo and isCargo) then
+                -- O bypass do AC garante que o fireproximityprompt não vai kickar por "distância"
+                pcall(function() fireproximityprompt(prompt) end)
+            end
+        end
+    end
+end))
+
+-- ==========================================
+-- MOVIMENTAÇÃO (Speed, Fly, Noclip, Invis)
+-- ==========================================
+local flyBV, flyConn = nil, nil
+track(RunService.Heartbeat:Connect(function()
+    local char = LP.Character
+    if not char then return end
+    local hum = char:FindFirstChildOfClass("Humanoid")
+    local root = char:FindFirstChild("HumanoidRootPart")
+    
+    if hum then
+        hum.WalkSpeed = Config.Movement.SpeedEnabled and Config.Movement.SpeedValue or 16
+    end
+    
+    -- Invisibilidade Simples (Local)
+    if Config.Movement.InvisEnabled ~= ghostActive and not Config.Farm.GhostFarm then
+        getgenv().Cobble_ToggleGhost(Config.Movement.InvisEnabled)
+    end
+    
+    -- Noclip
+    if Config.Movement.NoclipEnabled and char then
+        for _, part in ipairs(char:GetDescendants()) do
+            if part:IsA("BasePart") then part.CanCollide = false end
+        end
+    end
+    
+    -- Fly
+    if Config.Movement.FlyEnabled and not flyBV and root then
+        hum.PlatformStand = true
+        flyBV = Instance.new("BodyVelocity")
+        flyBV.MaxForce = Vector3.new(1e5,1e5,1e5)
+        flyBV.Velocity = Vector3.zero
+        flyBV.Parent = root
+        
+        flyConn = RunService.RenderStepped:Connect(function()
+            local camCF = Camera.CFrame
+            local moveDir = Vector3.zero
+            local UIS = game:GetService("UserInputService")
+            if UIS:IsKeyDown(Enum.KeyCode.W) then moveDir = moveDir + camCF.LookVector end
+            if UIS:IsKeyDown(Enum.KeyCode.S) then moveDir = moveDir - camCF.LookVector end
+            if UIS:IsKeyDown(Enum.KeyCode.A) then moveDir = moveDir - camCF.RightVector end
+            if UIS:IsKeyDown(Enum.KeyCode.D) then moveDir = moveDir + camCF.RightVector end
+            if UIS:IsKeyDown(Enum.KeyCode.Space) then moveDir = moveDir + Vector3.new(0,1,0) end
+            if UIS:IsKeyDown(Enum.KeyCode.LeftShift) then moveDir = moveDir - Vector3.new(0,1,0) end
+            flyBV.Velocity = moveDir.Magnitude > 0 and moveDir.Unit * 100 or Vector3.zero
+        end)
+    elseif not Config.Movement.FlyEnabled and flyBV then
+        hum.PlatformStand = false
+        flyBV:Destroy(); flyBV = nil
+        if flyConn then flyConn:Disconnect(); flyConn = nil end
+    end
+end))
+
+-- ==========================================
+-- UNLOAD
+-- ==========================================
+getgenv().Cobble_RP_Unload = function()
+    alive = false
+    for _, c in ipairs(connections) do pcall(function() c:Disconnect() end) end
+    destroyCache(playerDraw); destroyCache(carDraw); destroyCache(promptDraw)
+    if flyConn then flyConn:Disconnect() end
+    if flyBV then flyBV:Destroy() end
+    if ghostActive then getgenv().Cobble_ToggleGhost(false) end
+    if getgenv().Cobble_UI_Loaded then getgenv().Cobble_UI_Loaded:Destroy() end
+    print("[cobble] Script Unloaded.")
+end
